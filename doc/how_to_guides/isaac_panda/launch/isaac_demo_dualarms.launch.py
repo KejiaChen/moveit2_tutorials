@@ -6,13 +6,26 @@ from launch_ros.actions import Node
 from launch.actions import ExecuteProcess
 from ament_index_python.packages import get_package_share_directory
 from moveit_configs_utils import MoveItConfigsBuilder
+from launch_param_builder import ParameterBuilder
 
 
 def generate_launch_description():  
     ros2_control_hardware_type = DeclareLaunchArgument(
         "ros2_control_hardware_type",
-        default_value="isaac",
+        default_value="mock_components", # isaac or mock_components
         description="ROS2 control hardware interface type to use for the launch file -- possible values: [mock_components, isaac]",
+    )
+
+    use_sensone_left = DeclareLaunchArgument(
+        "use_sensone_left",
+        default_value="true",
+        description="Whether to include the BotaSys external force torque sensor in the left robot model",
+    )
+
+    use_sensone_right = DeclareLaunchArgument(
+        "use_sensone_right",
+        default_value="true",
+        description="Whether to include the BotaSys external force torque sensor in the right robot model",
     )
 
     moveit_config = (
@@ -20,21 +33,28 @@ def generate_launch_description():
         .robot_description(
             file_path="config/panda.urdf.xacro",
             mappings={
-                "ros2_control_hardware_type": LaunchConfiguration(
-                    "ros2_control_hardware_type"
-                )
+                "ros2_control_hardware_type": LaunchConfiguration("ros2_control_hardware_type"),
+                "use_sensone_left": LaunchConfiguration("use_sensone_left"),
+                "use_sensone_right": LaunchConfiguration("use_sensone_right"),
             },
-                           )
-        .robot_description_semantic(file_path="config/panda.srdf")
+            )
+        .robot_description_semantic(
+            file_path="config/panda.srdf.xacro",
+            mappings={
+                "use_sensone_left": LaunchConfiguration("use_sensone_left"),
+                "use_sensone_right": LaunchConfiguration("use_sensone_right"),
+            },
+            )
         .trajectory_execution(file_path="config/moveit_controllers.yaml")
         .planning_pipelines(pipelines=["ompl"])
+        .joint_limits(file_path="config/joint_limits.yaml")
         .to_moveit_configs()
     )
 
     # Load  ExecuteTaskSolutionCapability so we can execute found solutions in simulation
-    # move_group_capabilities = {
-    #     "capabilities": "move_group/ExecuteTaskSolutionCapability"
-    # }
+    move_group_capabilities = {
+        "capabilities": "move_group/ExecuteTaskSolutionCapability"
+    }
 
     # Start the actual move_group node/action server
     move_group_node = Node(
@@ -42,7 +62,7 @@ def generate_launch_description():
         executable="move_group",
         output="screen",
         parameters=[moveit_config.to_dict(),
-                    # move_group_capabilities,
+                    move_group_capabilities,
                     ],
         arguments=["--ros-args", "--log-level", "info"],
     )
@@ -51,7 +71,7 @@ def generate_launch_description():
     rviz_config = os.path.join(
         get_package_share_directory("dual_arm_panda_moveit_config"),
         "launch",
-        "move_group.rviz",
+        "dual_demo_rviz_pose_tracking.rviz",
     )
     rviz_node = Node(
         package="rviz2",
@@ -67,6 +87,34 @@ def generate_launch_description():
             moveit_config.joint_limits,
         ],
     )
+
+     # Get parameters for the Servo node
+    follow_servo_params = (
+        ParameterBuilder("moveit_servo")
+        .yaml(
+            parameter_namespace="moveit_servo",
+            file_path="config/follow_pose_tracking_settings.yaml",
+        )
+        .yaml(
+            parameter_namespace="moveit_servo",
+            file_path="config/follow_panda_simulated_config_pose_tracking.yaml",
+        )
+        .to_dict()
+    )
+    
+    lead_servo_params = (
+        ParameterBuilder("moveit_servo")
+        .yaml(
+            parameter_namespace="moveit_servo",
+            file_path="config/lead_pose_tracking_settings.yaml",
+        )
+        .yaml(
+            parameter_namespace="moveit_servo",
+            file_path="config/lead_panda_simulated_config_pose_tracking.yaml",
+        )
+        .to_dict()
+    )
+
     # Static TF
     static_tf_node = Node(
         package="tf2_ros",
@@ -75,6 +123,35 @@ def generate_launch_description():
         output="log",
         arguments=["0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "world", "left_panda_link0", "right_panda_link0"],
     )
+
+    # The servo cpp interface demo
+    # Creates the follower Servo node and publishes commands to it
+    follow_servo_node = Node(
+        package="moveit_servo",
+        executable="follow_demo",
+        output="screen",
+        parameters=[
+            # moveit_config.to_dict(),
+            follow_servo_params,
+            moveit_config.robot_description,
+            moveit_config.robot_description_semantic,
+        ],
+    )
+    
+    # The servo cpp interface demo
+    # Creates the leader Servo node and publishes commands to it
+    lead_servo_node = Node(
+        package="moveit_servo",
+        executable="lead_demo",
+        output="screen",
+        parameters=[
+            # moveit_config.to_dict(),
+            lead_servo_params,
+            moveit_config.robot_description,
+            moveit_config.robot_description_semantic,
+        ],
+    )
+
     # Publish TF
     robot_state_publisher = Node(
         package="robot_state_publisher",
@@ -154,11 +231,15 @@ def generate_launch_description():
     return LaunchDescription(
         [   
             ros2_control_hardware_type,
+            use_sensone_left,
+            use_sensone_right,
             rviz_node,
             static_tf_node,
+            follow_servo_node,
+            lead_servo_node,
+            ros2_control_node,
             robot_state_publisher,
             move_group_node,
-            ros2_control_node,
             joint_state_broadcaster_spawner,
             left_arm_controller_spawner,
             left_hand_controller_spawner,
